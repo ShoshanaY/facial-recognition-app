@@ -1,0 +1,65 @@
+import boto3
+import json
+
+s3 = boto3.client('s3')
+rekognition = boto3.client('rekognition', region_name='us-east-1')
+dynamodbTableName = 'employee'
+dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
+employeeTable = dynamodb.Table(dynamodbTableName)
+
+def lambda_handler(event, context):
+    try:
+        print("Received event:", json.dumps(event, indent=2))
+        bucket = event['Records'][0]['s3']['bucket']['name']
+        key = event['Records'][0]['s3']['object']['key']
+
+        response = index_employee_image(bucket, key)
+        print("Rekognition Response:", json.dumps(response, indent=2))
+
+        if response['ResponseMetadata']['HTTPStatusCode'] == 200 and response['FaceRecords']:
+            faceId = response['FaceRecords'][0]['Face']['FaceId']
+            name = key.split('.')[0].split('_')
+            if len(name) < 2:
+                raise ValueError("Invalid file name format. Expected format: 'firstName_lastName.extension'")
+            
+            firstName, lastName = name[0], name[1]
+            register_employee(faceId, firstName, lastName)
+        else:
+            print("No faces detected in the image.")
+        return response
+    except Exception as e:
+        print(f"Error processing employee image {key} from bucket {bucket}: {str(e)}")
+        raise e
+
+def index_employee_image(bucket, key):
+    try:
+        response = rekognition.index_faces(
+            Image={
+                'S3Object': {
+                    'Bucket': bucket,
+                    'Name': key
+                }
+            },
+            CollectionId="employees",
+            ExternalImageId=key.split('.')[0],  # Optionally set the ExternalImageId for easier tracking
+            MaxFaces=1,  # Only index one face per image
+            QualityFilter="AUTO"  # Automatically apply quality filters
+        )
+        return response
+    except Exception as e:
+        print(f"Error indexing image in Rekognition: {str(e)}")
+        raise e
+
+def register_employee(faceId, firstName, lastName):
+    try:
+        employeeTable.put_item(
+            Item={
+                'rekognitionId': faceId,
+                'firstName': firstName,
+                'lastName': lastName
+            }
+        )
+        print(f"Employee {firstName} {lastName} registered with Rekognition ID {faceId}.")
+    except Exception as e:
+        print(f"Error registering employee in DynamoDB: {str(e)}")
+        raise e

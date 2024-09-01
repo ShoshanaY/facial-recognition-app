@@ -1,0 +1,85 @@
+import boto3
+import json
+
+s3 = boto3.client('s3')
+rekognition = boto3.client('rekognition', region_name='us-east-1')
+dynamodbTableName = 'employee'
+dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
+employeeTable = dynamodb.Table(dynamodbTableName)
+bucketName = 'sm-visitor-images'
+
+def lambda_handler(event, context):
+    try:
+        # Log the incoming event
+        print("Received event:", json.dumps(event, indent=2))
+
+        # Retrieve the object key from the query parameters
+        if 'queryStringParameters' not in event or 'objectKey' not in event['queryStringParameters']:
+            raise ValueError("Missing 'objectKey' in query parameters.")
+
+        objectKey = event['queryStringParameters']['objectKey']
+
+        # Get the image bytes from S3
+        try:
+            image_bytes = s3.get_object(Bucket=bucketName, Key=objectKey)['Body'].read()
+        except Exception as e:
+            print(f"Error retrieving image from S3: {str(e)}")
+            return buildResponse(500, {'Message': 'Error retrieving image from S3.'})
+
+        # Search for faces in the image using Rekognition
+        try:
+            response = rekognition.search_faces_by_image(
+                CollectionId='employees',
+                Image={'Bytes': image_bytes}
+            )
+        except Exception as e:
+            print(f"Error searching for faces: {str(e)}")
+            return buildResponse(500, {'Message': 'Error searching for faces.'})
+
+        # Check if any faces were matched
+        for match in response.get('FaceMatches', []):
+            print(match['Face']['FaceId'], match['Face']['Confidence'])
+
+            try:
+                # Retrieve employee data from DynamoDB
+                face = employeeTable.get_item(
+                    Key={'rekognitionId': match['Face']['FaceId']}
+                )
+            except Exception as e:
+                print(f"Error retrieving employee data from DynamoDB: {str(e)}")
+                return buildResponse(500, {'Message': 'Error retrieving employee data from DynamoDB.'})
+
+            # Check if the employee was found in the database
+            if 'Item' in face:
+                print('Person Found:', face['Item'])
+                return buildResponse(200, {
+                    'Message': 'Success',
+                    'firstName': face['Item']['firstName'],
+                    'lastName': face['Item']['lastName']
+                })
+
+        # If no matches were found
+        print('Person could not be recognized.')
+        return buildResponse(403, {'Message': 'Person Not Found'})
+
+    except ValueError as ve:
+        print(f"Value error: {str(ve)}")
+        return buildResponse(400, {'Message': str(ve)})
+
+    except Exception as e:
+        print(f"Unexpected error: {str(e)}")
+        return buildResponse(500, {'Message': 'An unexpected error occurred.'})
+
+def buildResponse(statusCode, body=None):
+    response = {
+        'statusCode': statusCode,
+        'headers': {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Headers': 'Content-Type',
+            'Access-Control-Allow-Methods': 'OPTIONS,POST,GET'
+        }
+    }
+    if body is not None:
+        response['body'] = json.dumps(body)
+    return response
